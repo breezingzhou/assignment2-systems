@@ -17,6 +17,7 @@ dependencies = [
     "wandb>=0.19.7",
     "pandas>=2",
     "ty>=0.0.1a16",
+    "pydantic>=2.11.7",
 ]
 
 [build-system]
@@ -47,6 +48,11 @@ line-length = 120
 [tool.ruff.lint.extend-per-file-ignores]
 # Also ignore `E402` in all `__init__.py` files.
 "__init__.py" = ["E402", "F401", "F403", "E501"]
+
+[dependency-groups]
+dev = [
+    "ipykernel<7.0.0",
+]
 
 [tool.ruff.lint]
 extend-select = ["UP"]
