@@ -61,6 +61,7 @@ class LLMConfig:
   d_ff: int
   rope_theta: float
   batch_size: int
+  name: str = "LLM"
 
   def create_model_and_optimizer(self, device: str = "cuda") -> tuple[BasicsTransformerLM, AdamW]:
     model = BasicsTransformerLM(
@@ -104,6 +105,7 @@ small_config = LLMConfig(
     d_ff=3072,
     rope_theta=10000.0,
     batch_size=4,
+    name="small",
 )
 medium_config = LLMConfig(
     vocab_size=10_000,
@@ -114,6 +116,7 @@ medium_config = LLMConfig(
     d_ff=4096,
     rope_theta=10000.0,
     batch_size=4,
+    name="medium",
 )
 large_config = LLMConfig(
     vocab_size=10_000,
@@ -124,6 +127,7 @@ large_config = LLMConfig(
     d_ff=5120,
     rope_theta=10000.0,
     batch_size=4,
+    name="large",
 )
 xl_config = LLMConfig(
     vocab_size=10_000,
@@ -134,6 +138,7 @@ xl_config = LLMConfig(
     d_ff=6400,
     rope_theta=10000.0,
     batch_size=4,
+    name="xl",
 )
 _2_7B_config = LLMConfig(
     vocab_size=10_000,
@@ -144,6 +149,7 @@ _2_7B_config = LLMConfig(
     d_ff=10240,
     rope_theta=10000.0,
     batch_size=4,
+    name="2.7B",
 )
 
 dataname_to_config = {
@@ -194,14 +200,14 @@ for i, v in dataname_to_config.items():
 
 @hydra.main(config_path=None, config_name="benchmark_config", version_base=None)
 def run_benchmark(in_cfg: OmegaConf):
-  cfg = BenchmarkConfig(**in_cfg) # type: ignore
+  cfg = BenchmarkConfig(**in_cfg)  # type: ignore
   logging.info(f"Run Configuration: {cfg}")
-  llm_config = LLMConfig(**cfg.data) # type: ignore
+  llm_config = LLMConfig(**cfg.data)  # type: ignore
   logging.info(f"Model Configuration: {llm_config}")
 
   device = "cuda" if torch.cuda.is_available() else "cpu"
   run = run_model_impl(llm_config, backward=cfg.backward, device=device)
-  desc = f"backward={cfg.backward} [{cfg.warmup}, {cfg.trial}]"
+  desc = f"{llm_config.name} backward={cfg.backward} [{cfg.warmup}, {cfg.trial}]"
   times = benchmark(desc, run, num_warmups=cfg.warmup, num_trials=cfg.trial)
   times = np.array(times)
   logging.info(desc)
