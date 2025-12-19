@@ -1,20 +1,27 @@
 # %%
+from collections.abc import Callable
+from dataclasses import dataclass
+import logging
+from pydantic import BaseModel
 import math
-import cs336_basics.model
+import numpy as np
+import hydra
+from hydra.core.config_store import ConfigStore
+
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.nn_utils import cross_entropy
 from cs336_basics.optimizer import AdamW
+from cs336_systems.benchmark import benchmark
 
 
-import timeit
-from pydantic import BaseModel
+# %%
 import torch
 from torch import Tensor
 import torch.cuda.nvtx as nvtx
-from jaxtyping import Float, Bool, Int
+from jaxtyping import Float, Bool
 from einops import einsum
 
-# %%
+import cs336_basics.model
 
 
 @nvtx.range("scaled dot product attention")
@@ -44,7 +51,7 @@ cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_a
 # %%
 
 
-class Config(BaseModel):
+class LmConfig(BaseModel):
   vocab_size: int
   context_length: int
   d_model: int
@@ -70,50 +77,25 @@ class Config(BaseModel):
     return model, optimizer
 
 
-def run_benchmark(config: Config, warmup_steps: int = 5, measurement_steps: int = 10, include_backward: bool = True):
-  model, optimizer = config.create_model_and_optimizer(device="cuda")
+def run_model_impl(config: LmConfig, backward: bool, device: str = "cuda") -> Callable:
+  model, optimizer = config.create_model_and_optimizer(device=device)
   x = torch.randint(0, config.vocab_size, (config.batch_size,
-                                           config.context_length), device='cuda')
+                                           config.context_length), device=device)
   y = torch.randint(0, config.vocab_size, (config.batch_size,
-                                           config.context_length), device='cuda')
+                                           config.context_length), device=device)
 
   def model_run():
-    torch.cuda.synchronize()
-    forward_start = timeit.default_timer()
     y_pred = model(x)
     loss = cross_entropy(y_pred, y)
-    torch.cuda.synchronize()
-    forward_end = timeit.default_timer()
-    forward_cost = forward_end - forward_start
-
-    if not include_backward:
-      return forward_cost, 0.0
-
-    torch.cuda.synchronize()
-    backward_start = timeit.default_timer()
-    loss.backward()
-    torch.cuda.synchronize()
-    backward_end = timeit.default_timer()
-    optimizer.step()
-    optimizer.zero_grad()
-    backward_cost = backward_end - backward_start
-    return forward_cost, backward_cost
-
-  forward_costs = []
-  backward_costs = []
-  for warmup_step in range(warmup_steps):
-    # print(f"Warmup step {warmup_step + 1}/{warmup_steps}")
-    model_run()
-  for measurement_step in range(measurement_steps):
-    # print(f"Measurement step {measurement_step + 1}/{measurement_steps}")
-    forward_cost, backward_cost = model_run()
-    forward_costs.append(forward_cost)
-    backward_costs.append(backward_cost)
-  return forward_costs, backward_costs
+    if backward:
+      loss.backward()
+      # optimizer.step()
+      # optimizer.zero_grad()
+  return model_run
 
 
 # %%
-small_config = Config(
+small_config = LmConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=768,
@@ -123,7 +105,7 @@ small_config = Config(
     rope_theta=10000.0,
     batch_size=4,
 )
-medium_config = Config(
+medium_config = LmConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=1024,
@@ -133,7 +115,7 @@ medium_config = Config(
     rope_theta=10000.0,
     batch_size=4,
 )
-large_config = Config(
+large_config = LmConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=1280,
@@ -143,7 +125,7 @@ large_config = Config(
     rope_theta=10000.0,
     batch_size=4,
 )
-xl_config = Config(
+xl_config = LmConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=1600,
@@ -153,7 +135,7 @@ xl_config = Config(
     rope_theta=10000.0,
     batch_size=4,
 )
-_2_7B_config = Config(
+_2_7B_config = LmConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=2560,
@@ -164,9 +146,15 @@ _2_7B_config = Config(
     batch_size=4,
 )
 
-
+dataname_to_config = {
+    "small": small_config,
+    "medium": medium_config,
+    "large": large_config,
+    "xl": xl_config,
+    "2.7B": _2_7B_config,
+}
 # %%
-config = Config(
+config = LmConfig(
     vocab_size=10_000,
     context_length=256,
     d_model=768,
@@ -175,13 +163,50 @@ config = Config(
     d_ff=3072,
     rope_theta=10000.0,
     batch_size=16,
-)# %%
-forward_costs, backward_costs = run_benchmark(config, 5, 10)
+)
+
 
 # %%
-import numpy as np
-forward_costs = np.array(forward_costs)
-backward_costs = np.array(backward_costs)
-print(f"Forward: mean {forward_costs.mean():.4f}s, std {forward_costs.std():.4f}s")
-print(f"Backward: mean {backward_costs.mean():.4f}s, std {backward_costs.std():.4f}s")
+
+
+@dataclass
+class BenchmarkConfig():
+  data: str
+  backward: bool
+  warmup: int
+  trial: int
+  context_length: int
+
+
+DEFAULT_BENCHMARK_CONFIG = BenchmarkConfig(
+    data="small",
+    warmup=5,
+    trial=10,
+    backward=True,
+    context_length=128
+)
+
+cs = ConfigStore.instance()
+cs.store(name="benchmark_config", node=DEFAULT_BENCHMARK_CONFIG)
+
+
+@hydra.main(config_path=None, config_name="benchmark_config", version_base=None)
+def run_benchmark(cfg: BenchmarkConfig):
+  logging.info(f"Run Configuration: {cfg}")
+  lm_config = dataname_to_config[cfg.data]
+  lm_config.context_length = cfg.context_length
+  logging.info(f"Model Configuration: {lm_config.model_dump()}")
+
+  device = "cuda" if torch.cuda.is_available() else "cpu"
+  run = run_model_impl(lm_config, backward=cfg.backward, device=device)
+  desc = f"{cfg.data} backward={cfg.backward} [{cfg.warmup}, {cfg.trial}]"
+  times = benchmark(desc, run, num_warmups=cfg.warmup, num_trials=cfg.trial)
+  times = np.array(times)
+  logging.info(desc)
+  logging.info(f"times: {times}")
+  logging.info(f"mean={times.mean():.4f}, std={times.std():.4f}")
+
+
 # %%
+if __name__ == "__main__":
+  run_benchmark()
