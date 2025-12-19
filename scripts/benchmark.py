@@ -2,7 +2,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 import logging
-from pydantic import BaseModel
+from omegaconf import OmegaConf
 import math
 import numpy as np
 import hydra
@@ -51,7 +51,8 @@ cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_a
 # %%
 
 
-class LmConfig(BaseModel):
+@dataclass
+class LLMConfig:
   vocab_size: int
   context_length: int
   d_model: int
@@ -59,7 +60,6 @@ class LmConfig(BaseModel):
   num_heads: int
   d_ff: int
   rope_theta: float
-
   batch_size: int
 
   def create_model_and_optimizer(self, device: str = "cuda") -> tuple[BasicsTransformerLM, AdamW]:
@@ -77,7 +77,7 @@ class LmConfig(BaseModel):
     return model, optimizer
 
 
-def run_model_impl(config: LmConfig, backward: bool, device: str = "cuda") -> Callable:
+def run_model_impl(config: LLMConfig, backward: bool, device: str = "cuda") -> Callable:
   model, optimizer = config.create_model_and_optimizer(device=device)
   x = torch.randint(0, config.vocab_size, (config.batch_size,
                                            config.context_length), device=device)
@@ -95,7 +95,7 @@ def run_model_impl(config: LmConfig, backward: bool, device: str = "cuda") -> Ca
 
 
 # %%
-small_config = LmConfig(
+small_config = LLMConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=768,
@@ -105,7 +105,7 @@ small_config = LmConfig(
     rope_theta=10000.0,
     batch_size=4,
 )
-medium_config = LmConfig(
+medium_config = LLMConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=1024,
@@ -115,7 +115,7 @@ medium_config = LmConfig(
     rope_theta=10000.0,
     batch_size=4,
 )
-large_config = LmConfig(
+large_config = LLMConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=1280,
@@ -125,7 +125,7 @@ large_config = LmConfig(
     rope_theta=10000.0,
     batch_size=4,
 )
-xl_config = LmConfig(
+xl_config = LLMConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=1600,
@@ -135,7 +135,7 @@ xl_config = LmConfig(
     rope_theta=10000.0,
     batch_size=4,
 )
-_2_7B_config = LmConfig(
+_2_7B_config = LLMConfig(
     vocab_size=10_000,
     context_length=128,
     d_model=2560,
@@ -154,7 +154,7 @@ dataname_to_config = {
     "2.7B": _2_7B_config,
 }
 # %%
-config = LmConfig(
+config = LLMConfig(
     vocab_size=10_000,
     context_length=256,
     d_model=768,
@@ -171,35 +171,37 @@ config = LmConfig(
 
 @dataclass
 class BenchmarkConfig():
-  data: str
+  data: LLMConfig
   backward: bool
   warmup: int
   trial: int
-  context_length: int
 
 
 DEFAULT_BENCHMARK_CONFIG = BenchmarkConfig(
-    data="small",
+    data=small_config,
     warmup=5,
     trial=10,
     backward=True,
-    context_length=128
 )
+# %%
 
 cs = ConfigStore.instance()
 cs.store(name="benchmark_config", node=DEFAULT_BENCHMARK_CONFIG)
 
+for i, v in dataname_to_config.items():
+  cs.store(name=i, node=v, group="data")
+
 
 @hydra.main(config_path=None, config_name="benchmark_config", version_base=None)
-def run_benchmark(cfg: BenchmarkConfig):
+def run_benchmark(in_cfg: OmegaConf):
+  cfg = BenchmarkConfig(**in_cfg) # type: ignore
   logging.info(f"Run Configuration: {cfg}")
-  lm_config = dataname_to_config[cfg.data]
-  lm_config.context_length = cfg.context_length
-  logging.info(f"Model Configuration: {lm_config.model_dump()}")
+  llm_config = LLMConfig(**cfg.data) # type: ignore
+  logging.info(f"Model Configuration: {llm_config}")
 
   device = "cuda" if torch.cuda.is_available() else "cpu"
-  run = run_model_impl(lm_config, backward=cfg.backward, device=device)
-  desc = f"{cfg.data} backward={cfg.backward} [{cfg.warmup}, {cfg.trial}]"
+  run = run_model_impl(llm_config, backward=cfg.backward, device=device)
+  desc = f"backward={cfg.backward} [{cfg.warmup}, {cfg.trial}]"
   times = benchmark(desc, run, num_warmups=cfg.warmup, num_trials=cfg.trial)
   times = np.array(times)
   logging.info(desc)
