@@ -136,3 +136,6 @@
 == Problem (torch_compile)
 
 == Problem (flash_forward)
+=== Note:
+ + `flash attention`在实现的时候`q``k``v`需要考虑`batch_size`, 不能把`batch_size`与`seq_length`合并成一个维度来处理
+ + 多用`einsum`
