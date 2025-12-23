@@ -8,7 +8,7 @@ from jaxtyping import Float, Bool
 # %%
 
 
-class MyFlashAttn2AutogradFunction(torch.autograd.Function):
+class FlashAttnPytorch(torch.autograd.Function):
   @staticmethod
   def forward(ctx, Q: Float[torch.Tensor, "... queries d_k"], K: Float[torch.Tensor, "... keys d_k"], V: Float[torch.Tensor, "... keys d_v"], is_causal: Bool = False):
     q_shape = Q.shape
