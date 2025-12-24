@@ -12,6 +12,8 @@ class FlashAttnPytorch(torch.autograd.Function):
   @staticmethod
   def forward(ctx, Q: Float[torch.Tensor, "... queries d_k"], K: Float[torch.Tensor, "... keys d_k"], V: Float[torch.Tensor, "... keys d_v"], is_causal: Bool = False):
     q_shape = Q.shape
+    k_shape = K.shape
+    v_shape = V.shape
     Q, K, V = (
         rearrange(X, "... seq d -> (...) seq d")
         for X in (Q, K, V)
@@ -23,34 +25,34 @@ class FlashAttnPytorch(torch.autograd.Function):
     d = q_shape[-1]
     scale = 1 / math.sqrt(d)
 
-    block_size_q = 16
-    block_size_k = 16
+    Q_TILE_SIZE = 16
+    K_TILE_SIZE = 16
 
     result_O = []
     result_L = []
-    for q_start in range(0, Q.shape[1], block_size_q):
-      q_end = min(q_start + block_size_q, Q.shape[1])
-      q = Q[:, q_start:q_end]  # type: Float[Tensor, "batch_size block_size_q d"]
+    for q_start in range(0, Q.shape[1], Q_TILE_SIZE):
+      q_end = min(q_start + Q_TILE_SIZE, Q.shape[1])
+      q = Q[:, q_start:q_end]  # type: Float[Tensor, "BATCH_SIZE Q_TILE_SIZE d"]
 
       # init O_i, L_i, M_i
-      # type: Float[Tensor, "batch_size block_size_q d"]
+      # type: Float[Tensor, "BATCH_SIZE Q_TILE_SIZE d"]
       o = torch.zeros(q.shape, dtype=Q.dtype, device=Q.device)
-      # type: Float[Tensor, "batch_size block_size_q"]
+      # type: Float[Tensor, "BATCH_SIZE Q_TILE_SIZE"]
       l = torch.zeros(q.shape[:-1], dtype=Q.dtype, device=Q.device)
       m = torch.full(q.shape[:-1], float("-inf"), dtype=Q.dtype, device=Q.device)
-      for k_start in range(0, K.shape[1], block_size_k):
-        k_end = min(k_start + block_size_k, K.shape[1])
-        k = K[:, k_start:k_end]  # type: Float[Tensor, "batch_size block_size_k d"]
-        v = V[:, k_start:k_end]  # type: Float[Tensor, "batch_size block_size_k d"]
+      for k_start in range(0, K.shape[1], K_TILE_SIZE):
+        k_end = min(k_start + K_TILE_SIZE, K.shape[1])
+        k = K[:, k_start:k_end]  # type: Float[Tensor, "BATCH_SIZE K_TILE_SIZE d"]
+        v = V[:, k_start:k_end]  # type: Float[Tensor, "BATCH_SIZE K_TILE_SIZE d"]
 
         # compute tile of pre-softmax attention scores
         s = einsum(q, k, "batch bq d, batch bk d ->batch bq bk") * scale
 
         # compute logsumexp
         m_new = torch.maximum(m, torch.max(s, dim=-1).values)
-        # type: Float[Tensor, "batch_size block_size_q block_size_k"]
+        # type: Float[Tensor, "BATCH_SIZE Q_TILE_SIZE K_TILE_SIZE"]
         p = torch.exp(s - m_new.unsqueeze(-1))
-        assert p.shape[-2:] == (block_size_q, block_size_k)
+        assert p.shape[-2:] == (Q_TILE_SIZE, K_TILE_SIZE)
         l_new = torch.exp(m - m_new) * l + torch.sum(p, dim=-1)
 
         o_new = einsum(o, torch.exp(m - m_new), "... bq d, ... bq -> ... bq d") + \
@@ -68,7 +70,8 @@ class FlashAttnPytorch(torch.autograd.Function):
     L = torch.cat(result_L, dim=1)
     O = O.reshape(q_shape)
     L = L.reshape(q_shape[:-1])
-    ctx.save_for_backward(L)
+    Q, K, V = (X.reshape(shape) for X, shape in zip((Q, K, V), (q_shape, k_shape, v_shape)))
+    ctx.save_for_backward(Q, K, V, O, L)
     return O
 
   @staticmethod
