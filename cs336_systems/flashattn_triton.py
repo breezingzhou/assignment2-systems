@@ -163,4 +163,5 @@ class FlashAttnTriton(torch.autograd.Function):
     O = O.reshape(q_shape)
     L = L.reshape(q_shape[:-1])
     ctx.save_for_backward(L)
+    ctx.IS_CAUSAL = is_causal
     return O
