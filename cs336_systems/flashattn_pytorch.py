@@ -76,7 +76,20 @@ class FlashAttnPytorch(torch.autograd.Function):
 
   @staticmethod
   def backward(ctx, grad_output):
-    pass
+    (Q, K, V, O, L) = ctx.saved_tensors
+
+    d = Q.shape[-1]
+    scale = 1 / math.sqrt(d)
+
+    S = einsum(Q, K, '... q d, ... k d -> ... q k') * scale
+    P = torch.exp(S - L[..., :, None])  # type: Float[Tensor, "... q k"]
+    D = O * grad_output
+    dV = torch.transpose(P, -1, -2) @ grad_output  # type: Float[Tensor, "... k d"]
+    dP = grad_output @ torch.transpose(V, -1, -2)  # type: Float[Tensor, "... q k"]
+    dS = P * (dP - torch.sum(D, dim=-1, keepdim=True))  # type: Float[Tensor, "... q k"]
+    dQ = dS @ K * scale  # type: Float[Tensor, "... q d"]
+    dK = torch.transpose(dS, -1, -2) @ Q * scale  # type: Float[Tensor, "... k d"]
+    return dQ, dK, dV, None
 
 
 # %%
