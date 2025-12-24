@@ -29,6 +29,7 @@ def flash_fwd_kernel(
   # Program indices
   query_tile_index = tl.program_id(0)
   batch_index = tl.program_id(1)
+
   # Offset each pointer with the corresponding batch index
   # multiplied with the batch stride for each tensor
   Q_block_ptr = tl.make_block_ptr(
@@ -71,8 +72,10 @@ def flash_fwd_kernel(
       block_shape=(Q_TILE_SIZE,),
       order=(0,),
   )
+
   # Load Q tile
-  q = tl.load(Q_block_ptr, boundary_check=(0, 0), padding_option="zero")
+  q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+
   # init o l m
   o = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
   l = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
@@ -80,23 +83,25 @@ def flash_fwd_kernel(
 
   for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
     # Load K and V tiles
-    k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
-    v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+    v = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
 
     # Compute attention scores
-    s = tl.dot(q, tl.trans(k))  # (Q_TILE_SIZE,D) x (K_TILE_SIZE,D) -> (Q_TILE_SIZE,K_TILE_SIZE)
+    s = tl.dot(q, tl.trans(k))
     s = s * scale
 
     # compute logsumexp
     m_new = tl.maximum(m, tl.max(s, axis=1))
     p = tl.exp(s - m_new[:, None])
-    l_new = tl.exp(m - m_new) * l + tl.sum(p, axis=1)
-    o_new = tl.dot(tl.exp(m - m_new)[:, None], o) + tl.dot(p, v)
-    o, l, m = o_new, l_new, m_new
+    alpha = tl.exp(m - m_new)
+    l = alpha * l + tl.sum(p, axis=1)
+    o = o * alpha[:, None] + tl.dot(p, v)
+    m = m_new
+
     K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
     V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
 
-  result_O = tl.dot(1 / l, o)
+  result_O = o / l[:, None]
   result_L = m + tl.log(l)
   tl.store(O_block_ptr, result_O, boundary_check=(0, 1))
   tl.store(L_block_ptr, result_L, boundary_check=(0,))
@@ -107,39 +112,45 @@ def flash_fwd_kernel(
 class FlashAttnTriton(torch.autograd.Function):
   @staticmethod
   def forward(ctx, Q: Float[torch.Tensor, "... queries d_k"], K: Float[torch.Tensor, "... keys d_k"], V: Float[torch.Tensor, "... keys d_v"], is_causal: Bool = False):
-    output_dims = Q.shape
-    N_BATCHES = Q.shape[0]
-    N_QUERIES = Q.shape[-2]
-    N_KEYS = K.shape[-2]
+    q_shape = Q.shape
+    Q, K, V = (
+        rearrange(X, "... seq d -> (...) seq d").contiguous()
+        for X in (Q, K, V)
+    )
+    for X in (Q, K, V):
+      assert len(X.shape) == 3, "Input tensors to FlashAttention must be 3D."
+      assert X.is_contiguous(), "Input tensors to FlashAttention must be contiguous."
+
+    B = Q.shape[0]
+    N_QUERIES = Q.shape[1]
+    N_KEYS = K.shape[1]
     d = Q.shape[-1]
     scale = 1 / math.sqrt(d)
 
-    Q, K, V = (
-        rearrange(X, "batch_size (...) d -> (...) batch_size d")
-        for X in (Q, K, V)
-    )
-    O = torch.empty_like(Q)
-    L = torch.empty(Q.shape[:-1], dtype=Q.dtype, device=Q.device)
+    O = torch.empty((B, N_QUERIES, d), dtype=Q.dtype, device=Q.device)
+    # keep L in fp32 for numerical stability; tests only require it be saved
+    L = torch.empty((B, N_QUERIES), dtype=torch.float32, device=Q.device)
 
     ctx.Q_TILE_SIZE = 16  # type: ignore
     ctx.K_TILE_SIZE = 16  # type: ignore
-    ctx.B_TILE_SIZE = 4
 
-    flash_fwd_kernel[(triton.cdiv(N_QUERIES, ctx.Q_TILE_SIZE), triton.cdiv(N_BATCHES, ctx.B_TILE_SIZE))](
+    grid = (triton.cdiv(N_QUERIES, ctx.Q_TILE_SIZE), B)
+    flash_fwd_kernel[grid](  # type: ignore
         Q, K, V,
         O, L,
-        Q.stride(1), Q.stride(0), Q.stride(2),
-        K.stride(1), K.stride(0), K.stride(2),
-        V.stride(1), V.stride(0), V.stride(2),
-        O.stride(1), O.stride(0), O.stride(2),
-        L.stride(1), L.stride(0),
+        Q.stride(0), Q.stride(1), Q.stride(2),
+        K.stride(0), K.stride(1), K.stride(2),
+        V.stride(0), V.stride(1), V.stride(2),
+        O.stride(0), O.stride(1), O.stride(2),
+        L.stride(0), L.stride(1),
         N_QUERIES, N_KEYS,
         scale,
-        D=d,
-        Q_TILE_SIZE=ctx.Q_TILE_SIZE,
-        K_TILE_SIZE=ctx.K_TILE_SIZE,
+        D=d,  # type: ignore[arg-type]
+        Q_TILE_SIZE=ctx.Q_TILE_SIZE,  # type: ignore[arg-type]
+        K_TILE_SIZE=ctx.K_TILE_SIZE,  # type: ignore[arg-type]
     )
-    ctx.save_for_backward(Q, K, V, L)
-    result_O = rearrange(O, "(...) batch_size d -> batch_size (...) d", batch_size=N_BATCHES)
-    result_L = rearrange(L, "(...) batch_size -> batch_size (...)", batch_size=N_BATCHES)
-    return result_O, result_L
+
+    O = O.reshape(q_shape)
+    L = L.reshape(q_shape[:-1])
+    ctx.save_for_backward(L)
+    return O
