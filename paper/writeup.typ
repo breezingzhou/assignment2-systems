@@ -137,5 +137,21 @@
 
 == Problem (flash_forward)
 === Note:
- + `flash attention`在实现的时候`q``k``v`需要考虑`batch_size`, 不能把`batch_size`与`seq_length`合并成一个维度来处理
- + 多用`einsum`
++ `flash attention`在实现的时候`q``k``v`需要考虑`batch_size`, 不能把`batch_size`与`seq_length`合并成一个维度来处理
++ 多用`einsum`
++ Grid 布局 $["Batch" dot M dot N]$
+  - #table(
+
+      columns: (1fr, 1fr, 3fr),
+      rows: 4,
+      inset: (x: 20pt, y: 8pt),
+      align: center + horizon,
+
+      [目标], [Grid 顺序], [理由],
+      [最大化 Batch 间并行], [$("Batch", M)$], [让不同的 Batch 分布在不同的 SM 上，适合 Batch 很大、单矩阵很小的情况。],
+      [最大化 L2 缓存利用],
+      [$(M, "Batch")$],
+      [将同一个 Batch 的不同 Tile 放在连续的 pid 中。由于 GPU 调度倾向于先执行连续的 pid，这能让这些 Program 共享 L2 里的 Batch 数据。],
+
+      [避免显存碎片访问], [(最快变化轴, 其他)], [永远让 tl.program_id(0) 对应你内存中地址最连续的那个逻辑维度。],
+    )
