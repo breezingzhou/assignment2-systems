@@ -21,6 +21,7 @@ def flash_fwd_kernel(
     stride_lb, stride_lq,
     N_QUERIES, N_KEYS,
     scale,
+    IS_CAUSAL: tl.constexpr,
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
@@ -75,11 +76,13 @@ def flash_fwd_kernel(
 
   # Load Q tile
   q = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+  q_offsets = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
 
   # init o l m
   o = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
   l = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
   m = tl.full((Q_TILE_SIZE,), float("-inf"), dtype=tl.float32)
+
 
   for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
     # Load K and V tiles
@@ -89,6 +92,12 @@ def flash_fwd_kernel(
     # Compute attention scores
     s = tl.dot(q, tl.trans(k))
     s = s * scale
+
+    if IS_CAUSAL:
+      k_offsets = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+      causal_mask = q_offsets[:, None] >= k_offsets[None, :]
+      in_range = (q_offsets[:, None] < N_QUERIES) & (k_offsets[None, :] < N_KEYS)
+      s = tl.where(causal_mask & in_range, s, -1.0e6)
 
     # compute logsumexp
     m_new = tl.maximum(m, tl.max(s, axis=1))
@@ -145,6 +154,7 @@ class FlashAttnTriton(torch.autograd.Function):
         L.stride(0), L.stride(1),
         N_QUERIES, N_KEYS,
         scale,
+        IS_CAUSAL = is_causal,
         D=d,  # type: ignore[arg-type]
         Q_TILE_SIZE=ctx.Q_TILE_SIZE,  # type: ignore[arg-type]
         K_TILE_SIZE=ctx.K_TILE_SIZE,  # type: ignore[arg-type]

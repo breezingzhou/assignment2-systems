@@ -238,5 +238,5 @@ class WeightedSumFunc(torch.autograd.Function):
 x = torch.arange(3 * 8 * 16).view(3, 8, 16).float().requires_grad_().cuda()
 weight = torch.arange(0.1, 1.7, 0.1).requires_grad_().cuda()
 y = WeightedSumFunc.apply(x, weight)
-y
+
 # %%
