@@ -264,12 +264,13 @@ def flash_bwd_kernel(
     p = tl.exp(s - l[:, None])
 
     # Compute dV
-    dv = tl.dot(tl.trans(p), do).to(tl.float32)
+    dv = tl.dot(tl.trans(p), do)
 
     # Compute dp
     dp = tl.dot(do, tl.trans(v))
 
     # Compute ds
+    # important!!! delta[:, None] to broadcast correctly
     ds = p * (dp - delta[:, None]) * scale
 
     # Compute dQ
