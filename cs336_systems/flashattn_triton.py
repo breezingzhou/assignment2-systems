@@ -83,7 +83,6 @@ def flash_fwd_kernel(
   l = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
   m = tl.full((Q_TILE_SIZE,), float("-inf"), dtype=tl.float32)
 
-
   for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
     # Load K and V tiles
     k = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
@@ -120,12 +119,7 @@ def flash_fwd_kernel(
 
 class FlashAttnTriton(torch.autograd.Function):
   @staticmethod
-  def forward(ctx, Q: Float[torch.Tensor, "... queries d_k"], K: Float[torch.Tensor, "... keys d_k"], V: Float[torch.Tensor, "... keys d_v"], is_causal: Bool = False):
-    q_shape = Q.shape
-    Q, K, V = (
-        rearrange(X, "... seq d -> (...) seq d").contiguous()
-        for X in (Q, K, V)
-    )
+  def forward(ctx, Q: Float[torch.Tensor, "batch_size queries d_k"], K: Float[torch.Tensor, "batch_size keys d_k"], V: Float[torch.Tensor, "batch_size keys d_v"], is_causal: Bool = False):
     for X in (Q, K, V):
       assert len(X.shape) == 3, "Input tensors to FlashAttention must be 3D."
       assert X.is_contiguous(), "Input tensors to FlashAttention must be contiguous."
@@ -154,14 +148,12 @@ class FlashAttnTriton(torch.autograd.Function):
         L.stride(0), L.stride(1),
         N_QUERIES, N_KEYS,
         scale,
-        IS_CAUSAL = is_causal,
+        IS_CAUSAL=is_causal,
         D=d,  # type: ignore[arg-type]
         Q_TILE_SIZE=ctx.Q_TILE_SIZE,  # type: ignore[arg-type]
         K_TILE_SIZE=ctx.K_TILE_SIZE,  # type: ignore[arg-type]
     )
 
-    O = O.reshape(q_shape)
-    L = L.reshape(q_shape[:-1])
-    ctx.save_for_backward(L)
+    ctx.save_for_backward(Q, K, V, O, L)
     ctx.IS_CAUSAL = is_causal
     return O
