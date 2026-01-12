@@ -20,4 +20,4 @@ def distributed_demo(rank, world_size):
 
 if __name__ == "__main__":
   world_size = 4
-  mp.spawn(fn=distributed_demo, args=(world_size, ), nprocs=world_size, join=True)
+  mp.spawn(fn=distributed_demo, args=(world_size, ), nprocs=world_size, join=True) # type: ignore
