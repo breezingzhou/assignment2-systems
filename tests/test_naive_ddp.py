@@ -18,7 +18,7 @@ from .common import (
     validate_ddp_net_equivalence,
 )
 
-from cs336_systems.ddp import NaiveDDP
+from cs336_systems.ddp.ddp_naive import NaiveDDP
 
 
 logger = logging.getLogger(__name__)

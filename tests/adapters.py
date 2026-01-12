@@ -6,7 +6,7 @@ import torch
 
 from cs336_systems.flashattn_pytorch import FlashAttnPytorch
 from cs336_systems.flashattn_triton import FlashAttnTriton
-from cs336_systems.ddp_individual import DDPIndividualParameters
+from cs336_systems.ddp.ddp_individual_parameters import DDPIndividualParameters
 
 
 
