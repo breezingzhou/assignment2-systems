@@ -187,3 +187,41 @@
 
 
 == Problem(flash_benchmarking)
+
+== Problem(distributed_communication_single_node)
+
+== Problem(naive_ddp)
+
+== Problem(naive_ddp_benchmarking)
+
+== Problem(minimal_ddp_flat_benchmarking)
+
+== Problem(ddp_overlap_individual_parameters)
+=== Note:
++ `__init__(self, module)`
+  - 保存被包裹的模型
+  - 初始化分布式通信环境
+  - 广播模型参数和缓冲区，确保所有副本从相同的参数、缓冲区开始训练
+  - 为每个参数注册梯度同步hook (register_post_accumulate_grad_hook)
+  - #table(
+
+      columns: (2fr, 4fr, 4fr),
+      rows: 5,
+      inset: (x: 20pt, y: 8pt),
+      align: center + horizon,
+
+      [特性], [register_hook], [register_post_accumulate_grad_hook],
+      [注册对象], [任意 `Tensor`], [通常是 `nn.Parameter`],
+      [触发点], [梯度计算出的那一刻], [梯度写回 `.grad` 属性之后],
+      [hook函数的参数], [grad], [param],
+      [修改梯度], [通过返回值直接替换梯度], [直接在 `param.grad` 上进行操作],
+      [执行频率], [每次该 Tensor 参与反向传播时], [同上，但更侧重于最终累加状态],
+      [设计目的], [改变流动的梯度], [针对存储的梯度进行后处理],
+    )
++ `forward(self, *args, **kwargs)`
+  - 只做一件事：return `self.module(*args, **kwargs)`
+  - 不要在 forward 里做 `spawn`、`init_process_group`、`barrier` 等进程/通信生命周期管理（这些都应该在“进程入口”和 `__init__/after_backward` 里做）
++ `finish_gradient_synchronization(self)`
+  - 等待所有挂起的梯度同步操作完成
+  - 如果选择“all-reduce 后再除以 world_size”，则在这里做除法归一化
+  - 清理本轮状态(清空 `_pending_works` 列表)，为下一次迭代做准备
